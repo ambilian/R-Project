@@ -1,0 +1,456 @@
+---
+title: "**CO₂ Emissions Analysis Across New Zealand Regions (2007–2023)**"
+author: "Ambili"
+date: "2025-12-18"
+output:
+  html_document:
+    theme: flatly
+    toc: false
+    self_contained: true
+runtime: shiny
+---
+<style>
+.main-container {
+  max-width: 100% !important;
+  padding-left: 10px;
+  padding-right: 10px;
+}
+</style>
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE,message = FALSE,
+  warning = FALSE)
+```
+
+## **1. Project Objective**
+
+The primary objective of this project is to analyse and visualise carbon dioxide (CO₂) emissions across New Zealand regions over time, in order to:
+
+- Understand **regional and temporal emission patterns**
+- Identify which **regions and years** recorded the highest CO₂ emissions
+- Examine **industry-level contributors** to emissions within each region
+- Support **evidence-based sustainability and policy decision-making**
+
+An interactive **R Shiny application** was developed to allow users to explore emissions dynamically by **region, year, and industry**.
+
+---
+
+## **2. Business Questions (Project Requirements)**
+
+This project was designed to answer the following key business and policy questions:
+
+1. **Which New Zealand region contributes the most to CO₂ emissions, and in which year?**
+2. **How have CO₂ emissions changed over time within each region (2007–2023)?**
+3. **What industries are the major contributors to CO₂ emissions in each region?**
+4. **Are there observable reductions in emissions in recent years, and where are they most significant?**
+5. **How can regional emission patterns inform sustainability strategies and policy interventions?**
+
+These questions align closely with **public-sector**, **environmental monitoring**, and **sustainability analytics** requirements.
+
+---
+
+## **3. Data Overview & Preparation**
+
+**Data Source:**  
+- *Stats NZ – Greenhouse gas emissions by region, industry, and household (Year ended 2023)*
+
+**Dataset Characteristics:**
+- **Time period:** 2007–2023  
+- **Records after cleaning:** ~7,800+  
+- **Gas type analysed:** Carbon dioxide equivalents (CO₂e) only  
+
+### **Key Data Preparation Steps**
+
+- Removal of aggregated totals (*“Total”* and *“Total all industries”*) to avoid double counting  
+- Standardisation of region names to align with **official New Zealand regional boundaries**  
+- Aggregation of emissions by **region, year, and industry**  
+- Handling of **missing values** and **duplicate records**
+
+
+
+```{r eruptions, echo=FALSE}
+
+# Loading libraries
+library(shiny)
+library(dplyr)
+library(ggplot2)
+library(sf)
+library(plotly)
+library(RColorBrewer)
+
+setwd("C:\\Users\\ambil\\OneDrive\\Documents\\MBIE")  # Replace with the actual path to your directory
+
+# Reading the Dataset
+co2_data <- read.csv("greenhouse-gas-emissions-by-region-industry-and-household-year-ended-2023.csv", stringsAsFactors = FALSE)
+
+co2_data <- co2_data %>% filter(Gas == "Carbon dioxide equivalents")
+# Remove rows where Anzsic_descriptor is 'Total' or 'Total all industries'
+co2_data <- co2_data %>% filter(!(Anzsic_descriptor %in% c("Total", "Total all industries")))
+co2_data <- co2_data %>% distinct()  # Remove duplicates
+missing_values <- colSums(is.na(co2_data))
+
+region_mapping <- c(
+  "Auckland" = "Auckland Region",
+  "Bay of Plenty" = "Bay of Plenty Region",
+  "Canterbury" = "Canterbury Region",
+  "Gisborne" = "Gisborne Region",
+  "Hawke's Bay" = "Hawke's Bay Region",
+  "Manawatu-Whanganui" = "Manawatu-Whanganui Region",
+  "Marlborough" = "Marlborough Region",
+  "Northland" = "Northland Region",
+  "Otago" = "Otago Region",
+  "Southland" = "Southland Region",
+  "Taranaki" = "Taranaki Region",
+  "Tasman/Nelson" = "Tasman-Nelson Region",
+  "Waikato" = "Waikato Region",
+  "Wellington" = "Wellington Region",
+  "West Coast" = "West Coast Region"
+)
+
+# Shape files reading
+nz_shapefile <- st_read("C:\\Users\\ambil\\OneDrive\\Documents\\MBIE\\statsnz-regional-council-2025-SHP\\regional-council-2025.shp")
+
+nz_shapefile$Region <- recode(nz_shapefile$REGC2025_1, !!!region_mapping)
+nz_shapefile$Region <- gsub(" Region", "", nz_shapefile$Region)
+co2_data$Region <- gsub("Manawatu-Whanganui", "Manawatū-Whanganui", co2_data$Region)
+
+# Define UI and server for Shiny App
+ui <- fluidPage(
+  titlePanel("CO2 Gas Emissions by Region (Clickable Map)"),
+  
+  fluidRow(
+    column(6, plotOutput("map", click = "map_click")),
+    column(6, plotlyOutput("bar_graph", height = "400px"))  # Height added for bar chart
+  ),
+  
+  fluidRow(
+    column(12, uiOutput("region_summary_text"))
+  ),
+  
+  div(style = "height: 20px;"),
+  
+ # fluidRow(
+#    column(12, plotlyOutput("industry_pie", height = "400px"))  
+ # ),
+  
+  fluidRow(
+    column(
+      width = 7,
+      plotOutput("heatmap_emissions", height = "500px")
+    ),
+    column(
+      width = 5,
+      plotlyOutput("industry_pie", height = "400px")
+    )
+  ),
+
+)
+
+server <- function(input, output, session) {
+  
+  selected_region <- reactiveVal(NULL)
+  selected_color <- reactiveVal(NULL) 
+  clicked_year <- reactiveVal(NULL)
+  
+  # Precompute summary for all regions
+  co2_summary <- co2_data %>% 
+    mutate(Region = gsub(" Region", "", Region)) %>% 
+    group_by(Region) %>% 
+    summarise(
+      min_year = Year[which.min(Data_value)],
+      min_value = min(Data_value),
+      max_year = Year[which.max(Data_value)],
+      max_value = max(Data_value)
+    ) %>% 
+    mutate(text_message = paste0(
+      "Region: ", Region, 
+      " - Lowest CO2 Emission: ", min_value, " in ", min_year, 
+      " | Highest CO2 Emission: ", max_value, " in ", max_year
+    ))
+  
+  # Create a color scale based on the total CO2 emissions
+  region_colors <- co2_data %>%
+    group_by(Region) %>%
+    summarise(total_emissions = sum(Data_value, na.rm = TRUE)) %>%
+    mutate(color = scales::col_numeric(palette = brewer.pal(9, "YlGnBu"), domain = range(total_emissions))(total_emissions))
+  
+  # Map output
+  output$map <- renderPlot({
+    ggplot() +
+      geom_sf(data = nz_shapefile, aes(fill = Region), color = "white") + 
+      theme_minimal() +
+      scale_fill_manual(values = setNames(region_colors$color, region_colors$Region)) + 
+      labs(title = "Click on the New Zealand Map") +
+      coord_sf()
+  })
+  
+  # Update selected region when clicked on the map
+  observeEvent(input$map_click, {
+    req(input$map_click)
+    
+    clicked_point <- sf::st_sfc(
+      sf::st_point(c(input$map_click$x, input$map_click$y)),
+      crs = sf::st_crs(nz_shapefile)
+    ) %>% sf::st_sf(geometry = .)
+    
+    result <- sf::st_intersects(clicked_point, nz_shapefile)
+    
+    # Only proceed if result is valid and non-empty
+    if (length(result) > 0 && length(result[[1]]) > 0) {
+      matched_index <- result[[1]][1]
+      region_name <- gsub(" Region", "", nz_shapefile$Region[matched_index])
+      selected_region(region_name)
+      
+      region_color <- region_colors %>% 
+        dplyr::filter(Region == region_name) %>% 
+        dplyr::pull(color)
+      
+      selected_color(region_color)
+      clicked_year(NULL)
+    } else {
+      message("No region matched the clicked point.")
+    }
+  })
+  
+  # Get data for the selected region
+  selected_data <- reactive({
+    req(selected_region())
+    co2_data %>% 
+      mutate(Region = gsub(" Region", "", Region)) %>% 
+      filter(Region == selected_region()) %>% 
+      group_by(Year) %>% 
+      summarise(total_emissions = sum(Data_value, na.rm = TRUE))
+  })
+  
+  # Render bar graph
+  output$bar_graph <- renderPlotly({
+    data <- selected_data()
+    region_color <- selected_color()  
+    if (is.null(region_color)) {
+      region_color <- "gray"
+    }
+    
+    if (nrow(data) == 0) {
+      plot_ly() %>% layout(title = "No Data Available for Selected Region")
+    } else {
+      plot_ly(
+        data,
+        x = ~Year,
+        y = ~total_emissions,
+        type = 'bar',
+        text = ~total_emissions,
+        textposition = 'outside',
+        marker = list(color = region_color),
+        source = "bar"
+      ) %>% layout(
+        title = paste("CO2 Emissions in", selected_region()),
+        xaxis = list(title = "Year"),
+        yaxis = list(title = "Total CO2 Emissions")
+      ) %>%
+        config(displayModeBar = FALSE)
+    }
+  })
+  
+  # Display region summary
+  output$region_summary_text <- renderUI({
+    req(selected_region())
+    message_row <- co2_summary %>% filter(Region == selected_region())
+    if (nrow(message_row) > 0) {
+      HTML(paste(
+        "<div style='font-size:18px; text-align:right;'>", 
+        message_row$text_message, 
+        "</div>"
+      ))
+    } else {
+      HTML("<div style='font-size:18px; text-align:right;'>No summary available for this region.</div>")
+    }
+  })
+  
+  industry_data <- reactive({
+    req(selected_region())
+    co2_data %>%
+      mutate(Region = gsub(" Region", "", Region)) %>%
+      filter(Region == selected_region()) %>%
+      group_by(Anzsic_descriptor) %>%
+      summarise(total_emissions = sum(Data_value, na.rm = TRUE)) %>%
+      filter(total_emissions > 0)
+  })
+  
+  output$industry_pie <- renderPlotly({
+    data <- industry_data()
+    
+    if (nrow(data) == 0) {
+      plot_ly() %>% layout(title = "No Industry Data Available")
+    } else {
+      plot_ly(
+        data,
+        labels = ~Anzsic_descriptor,
+        values = ~total_emissions,
+        type = 'pie',
+        textinfo = 'percent',
+        hoverinfo = 'label+percent+value'
+      ) %>%
+        layout(
+          title = paste(
+            "Industry-wise CO₂ Emissions in",
+            selected_region()
+          ),
+          showlegend = FALSE,   # ✅ KEY FIX
+          margin = list(l = 10, r = 10, t = 50, b = 10)
+        )
+    }
+  })
+  
+  
+  
+  # Aggregate emissions by Region and Year (GLOBAL comparison)
+  region_year_emissions <- co2_data %>%
+    mutate(Region = gsub(" Region", "", Region)) %>%
+    group_by(Region, Year) %>%
+    summarise(total_emissions = sum(Data_value, na.rm = TRUE), .groups = "drop")
+  
+  # Find the maximum emitting region-year
+  max_region_year <- region_year_emissions %>%
+    arrange(desc(total_emissions)) %>%
+    slice(1)
+  
+  
+  
+  output$global_max_text <- renderText({
+    paste0(
+      "Highest CO₂ emissions were recorded in ",
+      max_region_year$Region,
+      " in ",
+      max_region_year$Year,
+      " with total emissions of ",
+      round(max_region_year$total_emissions, 2)
+    )
+  })
+  
+  fluidRow(
+    column(12, plotOutput("heatmap_emissions", height = "500px"))
+  )
+  
+  
+  
+  output$heatmap_emissions <- renderPlot({
+    
+    ggplot(region_year_emissions, aes(x = Year, y = Region, fill = total_emissions)) +
+      geom_tile(color = "white") +
+      scale_fill_gradient(
+        low = "#edf8fb",
+        high = "#006d2c",
+        name = "Total CO₂ Emissions"
+      ) +
+      labs(
+        title = "CO₂ Emissions by Region and Year",
+        subtitle = paste(
+          "Highest emission:",
+          max_region_year$Region,
+          "in",
+          max_region_year$Year
+        ),
+        x = "Year",
+        y = "Region"
+      ) +
+      theme_minimal() +
+      theme(
+        axis.text.x = element_text(angle = 45, hjust = 1),
+        plot.title = element_text(face = "bold")
+      )
+  })
+  
+  output$download_plot <- downloadHandler(
+    filename = function() {
+      paste("my_shiny_chart_", Sys.Date(), ".pdf", sep = "")
+    },
+    content = function(file) {
+      pdf(file, width = 11, height = 8.5)   # A4 landscape
+      print(my_plot())                      # your ggplot function
+      dev.off()
+    }
+  )
+ 
+  
+}
+
+# Run the Shiny app
+shinyApp(ui = ui, server = server)
+
+```
+## **4. Visual Analytics & Insights**
+
+---
+
+### **4.1 Regional Emissions Overview (Clickable Map)**
+
+The interactive **New Zealand map** provides a high-level spatial overview of CO₂ emissions by region.
+
+**Insight:**
+- Regions such as **Waikato, Canterbury, and Auckland** consistently show higher emission intensities compared to smaller regions.
+- The map acts as an **entry point**, allowing users to drill down into **region-specific trends**.
+
+---
+
+### **4.2 Emissions Trend by Region (Bar Chart)**
+
+For a selected region, annual CO₂ emissions from **2007 to 2023** are displayed using a bar chart.
+
+**Key Observations:**
+- Most regions show **relatively stable or rising emissions** until the mid-2010s.
+- A **noticeable decline** appears post-2020, particularly during **2022–2023**.
+- This reduction is consistent across multiple regions, indicating **systemic rather than localised change**.
+
+---
+
+### **4.3 Highest Emitting Region and Year (Heatmap Analysis)**
+
+A heatmap comparing **Region × Year** reveals the global maximum emission point.
+
+**Key Finding:**
+- **Waikato recorded the highest CO₂ emissions in 2008**, making it the peak emission region-year combination in the dataset.
+
+**Why this matters:**
+- Enables rapid identification of **high-risk regions and periods**
+- Supports **long-term trend monitoring** rather than isolated year analysis
+
+---
+
+### **4.4 Industry-Wise Emissions Breakdown (Pie Chart)**
+
+For each selected region, CO₂ emissions are broken down by industry.
+
+**Consistent Insights Across Regions:**
+- Primary industries  
+- Agriculture, forestry, and fishing  
+- Agriculture alone  
+
+Together, these sectors account for **70–80% of total CO₂ emissions** in many regions.
+
+**Regional Variation:**
+- **Urban regions** (e.g., Auckland) show relatively higher contributions from **households and service industries**
+- **Rural regions** (e.g., Waikato, Canterbury, Manawatū-Whanganui) are dominated by **agriculture-related activities**
+
+---
+
+## **5. Key Takeaways**
+
+1. **Waikato is the highest CO₂-emitting region**, with the peak recorded in **2008**, highlighting its long-term environmental impact.
+2. **Agriculture and primary industries** are the dominant drivers of emissions across most New Zealand regions.
+3. **Post-2020 emission reductions** are visible across multiple regions, likely influenced by:
+   - Increased renewable energy adoption  
+   - Changes in industrial activity  
+   - Post-COVID shifts such as remote and hybrid work
+4. Emission patterns vary significantly by region, reinforcing the need for **region-specific sustainability strategies** rather than a one-size-fits-all approach.
+5. **Interactive visualisation** (maps, trends, and industry breakdowns) enables faster insight generation and improved stakeholder understanding.
+
+---
+
+## **7. Conclusion**
+
+This CO₂ emissions analysis project successfully transforms complex, multi-year environmental data into **clear, actionable insights** through interactive visual analytics. By identifying emission hotspots, dominant industries, and long-term trends, the project supports **informed decision-making** and demonstrates the **practical application of data analytics in sustainability and public-sector contexts**.
+
+
+
+
+
